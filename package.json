@@ -1,0 +1,15 @@
+{
+  "name": "quanticdata-mcp-server",
+  "version": "1.0.0",
+  "description": "Single-file MCP server for the QuanticData Data APIs — scrape, search, map, crawl, SEO audit and 31 ready-made collectors for Claude, Cursor and any MCP client.",
+  "type": "module",
+  "main": "server.mjs",
+  "bin": { "quanticdata-mcp-server": "server.mjs" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node smoke-test.mjs"
+  },
+  "engines": { "node": ">=18" },
+  "keywords": ["mcp", "model-context-protocol", "claude", "cursor", "web-scraping", "serp-api", "ai-agents"],
+  "license": "MIT"
+}
