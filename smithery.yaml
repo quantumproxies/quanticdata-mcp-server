@@ -1,0 +1,17 @@
+# Smithery configuration — https://smithery.ai/docs
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    required:
+      - quanticdataApiKey
+    properties:
+      quanticdataApiKey:
+        type: string
+        description: API key from https://quanticdata.io (free monthly usage, no card required)
+  commandFunction: |-
+    (config) => ({
+      command: 'npx',
+      args: ['-y', 'quanticdata-mcp'],
+      env: { QUANTICDATA_API_KEY: config.quanticdataApiKey }
+    })
