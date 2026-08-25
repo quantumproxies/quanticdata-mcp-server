@@ -7,7 +7,7 @@ block ordinary bots come back clean. It also hands the agent raw proxy
 endpoints of every type (residential, mobile, datacenter, ISP, IPv6) from your
 active plans, ready to plug into any HTTP client.
 
-It calls the **public** QuanticData Scraper API with your own `qp_live_` key,
+It calls the **public** QuanticData Scraper API with your own `qd_live_` key,
 so there are no internal secrets and you run it locally.
 
 ## Tools
@@ -37,7 +37,7 @@ No install needed — `npx` fetches [quanticdata-mcp](https://www.npmjs.com/pack
 
 ```bash
 claude mcp add quanticdata \
-  -e QUANTICDATA_API_KEY=qp_live_your_key_here \
+  -e QUANTICDATA_API_KEY=qd_live_your_key_here \
   -- npx -y quanticdata-mcp
 ```
 
@@ -49,10 +49,41 @@ claude mcp add quanticdata \
     "quanticdata": {
       "command": "npx",
       "args": ["-y", "quanticdata-mcp"],
-      "env": { "QUANTICDATA_API_KEY": "qp_live_your_key_here" }
+      "env": { "QUANTICDATA_API_KEY": "qd_live_your_key_here" }
     }
   }
 }
+```
+
+## Hosted endpoint (remote MCP)
+
+The same server also runs as a hosted **Streamable HTTP** endpoint, for clients
+that prefer a URL over a local package:
+
+```
+https://api.quanticdata.io/mcp
+```
+
+Your key travels per request in the `Authorization` header, so nothing is
+stored server-side and one endpoint serves every account:
+
+```bash
+curl -X POST https://api.quanticdata.io/mcp \
+  -H "Authorization: Bearer qd_live_your_key_here" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+In a client that supports remote MCP servers, add it as an HTTP server with
+that URL and a bearer token. `initialize` and `tools/list` answer without a
+key so directories and inspectors can introspect the server; tool calls need
+one.
+
+Self-hosting the endpoint is a second binary in this same package:
+
+```bash
+QUANTICDATA_API_KEY=qd_live_… PORT=9310 npx -y quanticdata-mcp-remote
 ```
 
 ## Run from source (development)
@@ -71,28 +102,18 @@ Then point the client at the local build instead of npx:
       "command": "node",
       "args": ["/absolute/path/to/scraper-mcp/dist/index.js"],
       "env": {
-        "QUANTICDATA_API_KEY": "qp_live_your_key_here"
+        "QUANTICDATA_API_KEY": "qd_live_your_key_here"
       }
     }
   }
 }
 ```
 
-## Run with Docker
-
-```bash
-docker build -t quanticdata-mcp .
-docker run -i --rm -e QUANTICDATA_API_KEY=your_key_here quanticdata-mcp
-```
-
-The server starts even without a key so `initialize` / `tools/list` answer for
-inspectors and registries; tool calls then return a clear "key is not set" error.
-
 ## Env
 
 | Var | Default | Notes |
 |-----|---------|-------|
-| `QUANTICDATA_API_KEY` | — | **Required.** Your `qp_live_` key. |
+| `QUANTICDATA_API_KEY` | — | **Required.** Your `qd_live_` key. |
 | `QUANTICDATA_API_BASE` | `https://api.quanticdata.io/v1` | Override for staging/self-host. |
 
 ## Example prompts
@@ -102,7 +123,3 @@ inspectors and registries; tool calls then return a clear "key is not set" error
 - "Map docs.example.com, then crawl only the /guides/ pages and summarize them."
 - "List my proxy plans and generate 5 sticky US residential proxies as socks5 URLs."
 - "Get me a rotating mobile proxy in Germany and whitelist my server IP 203.0.113.7."
-
-## Standalone variant
-
-`standalone/server.mjs` is a single-file, zero-dependency version of this server for environments where npx is unavailable — same tools, same API.
