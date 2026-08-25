@@ -1,106 +1,98 @@
-# QuanticData MCP server — give Claude, Cursor and any MCP client live web access
+# QuanticData MCP Server
 
-A single-file, **zero-dependency** MCP server that puts the
-[QuanticData](https://quanticdata.io) Data APIs in front of an AI agent: scrape a page, run a
-Google/Bing/DuckDuckGo/Yandex search, map or crawl a site, audit a URL for SEO, and run any of
-the **31 ready-made [Collectors](https://quanticdata.io/collectors/)** with a semantic input.
+Connect [QuanticData](https://quanticdata.io) to Claude, Cursor, and any
+MCP client. Gives an AI agent live web access — scrape, search, map, and crawl —
+through residential proxies with real-browser TLS fingerprints, so pages that
+block ordinary bots come back clean. It also hands the agent raw proxy
+endpoints of every type (residential, mobile, datacenter, ISP, IPv6) from your
+active plans, ready to plug into any HTTP client.
 
-No SDK, no build step, no `node_modules`. Node.js 18+ and one file.
+It calls the **public** QuanticData Scraper API with your own `qp_live_` key,
+so there are no internal secrets and you run it locally.
 
-```bash
-git clone https://github.com/quantumproxies/quanticdata-mcp-server
-cd quanticdata-mcp-server
-QUANTICDATA_API_KEY=qd_live_your_key_here node server.mjs
-```
+## Tools
 
-Get a key at [app.quanticdata.io](https://app.quanticdata.io/register) — there is a free monthly
-allowance and no card is required; see the [pricing on quanticdata.io](https://quanticdata.io/docs/)
-for the current figure.
+| Tool | What it does |
+|------|--------------|
+| `scrape` | Scrape one URL → Markdown/HTML/text, including PDF/Office documents. Supports multi-format output, absolute link collection, JSON-LD metadata, structured CSS extraction, AI prompt/JSON-schema extraction, and `mode: summary`. |
+| `seo_audit` | Fetch a URL as a no-JS bot **and** fully rendered, return both SEO views + the diff (JS-only content, changed title/description, missing canonical) and bot-facing meta (robots, OG, JSON-LD). |
+| `search` | Structured Google/Bing/DuckDuckGo results. Set `render: true` for Google AI Overview, PAA, Knowledge Graph and other JS enrichments. |
+| `search_and_read` | SERP → fetch top pages → numbered citation-ready sources and one token-bounded context string ready for an AI prompt. |
+| `search_bulk` / `search_bulk_status` | Async multi-page pagination with merged organic results and page-one AI/zero-click enrichments. |
+| `map` | Fast URL discovery (sitemaps + homepage links), no full crawl. Compact by default: up to `limit` URLs (100) plus site-wide `total` and per-section `summary`; `group_by: path` for the path tree. |
+| `crawl` / `crawl_status` | Async BFS site crawl → Markdown per page; poll for progress. |
+| `batch` / `batch_status` | Scrape many URLs asynchronously; `mode: summary` for metadata-only items. Incremental polling via `since` cursor; page content only with `include_content`. |
+| `create_dataset` / `dataset_status` | Prompt-driven structured dataset collection with budget and row limits. |
+| `list_collectors` / `run_collector` / `collector_run_status` | Ready-made Collectors: run a versioned scraper with a semantic input (keyword + location, place id, product id, domain…) instead of URLs — Google Maps places, place reviews, Google Jobs/News/Shopping, product offers, hotels, local business leads, site contacts, company profile. Priced per delivered row; async runs poll by `run_id`, rows exportable as CSV. |
+| `list_proxies` | List your proxy services of every type — Residential Basic/Premium/Private, Mobile, Mobile V2, Datacenter, ISP, IPv6 — with bandwidth left, expiry and the `orderId` used to generate. |
+| `generate_proxies` | Ready-to-use proxy strings (credentials included) from any active plan: geo targeting (country/state/city/ISP/ASN), rotating or sticky sessions, HTTP or SOCKS5, several output formats. |
+| `proxy_locations` | Valid geo-targeting values per plan type: countries, states, cities, ASNs, or the full location tree with ISP codes. |
+| `whitelist_ip` | Manage IP-auth whitelisting (add/list/remove) for plans that support it, including the Mobile V2 IP-auth proxy list. |
 
-## Install it in your client
+## Quick start
 
-**Claude Code**
+No install needed — `npx` fetches [quanticdata-mcp](https://www.npmjs.com/package/quanticdata-mcp) on demand (Node.js 18+).
+
+**Claude Code** (one command):
 
 ```bash
 claude mcp add quanticdata \
-  -e QUANTICDATA_API_KEY=qd_live_your_key_here \
-  -- node /absolute/path/to/quanticdata-mcp-server/server.mjs
+  -e QUANTICDATA_API_KEY=qp_live_your_key_here \
+  -- npx -y quanticdata-mcp
 ```
 
-**Claude Desktop** — `claude_desktop_config.json`
+**Claude Desktop / Cursor / any MCP client** (`claude_desktop_config.json`, `.cursor/mcp.json`, or `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "quanticdata": {
+      "command": "npx",
+      "args": ["-y", "quanticdata-mcp"],
+      "env": { "QUANTICDATA_API_KEY": "qp_live_your_key_here" }
+    }
+  }
+}
+```
+
+## Run from source (development)
+
+```bash
+npm install
+npm run build
+```
+
+Then point the client at the local build instead of npx:
 
 ```json
 {
   "mcpServers": {
     "quanticdata": {
       "command": "node",
-      "args": ["/absolute/path/to/quanticdata-mcp-server/server.mjs"],
-      "env": { "QUANTICDATA_API_KEY": "qd_live_your_key_here" }
+      "args": ["/absolute/path/to/scraper-mcp/dist/index.js"],
+      "env": {
+        "QUANTICDATA_API_KEY": "qp_live_your_key_here"
+      }
     }
   }
 }
 ```
 
-**Cursor** — `.cursor/mcp.json`, same shape as above.
+## Env
 
-Any client that speaks stdio MCP works: the server implements `initialize`, `tools/list`,
-`tools/call` and `ping`, which is the complete surface for a tools-only server.
+| Var | Default | Notes |
+|-----|---------|-------|
+| `QUANTICDATA_API_KEY` | — | **Required.** Your `qp_live_` key. |
+| `QUANTICDATA_API_BASE` | `https://api.quanticdata.io/v1` | Override for staging/self-host. |
 
-## Tools
+## Example prompts
 
-| Tool | What the agent gets | Price |
-|---|---|---|
-| `scrape` | one URL → Markdown / HTML / text, CSS or AI extraction, optional render | $0.0002 |
-| `search` | organic results + related searches, 4 engines, 18 verticals | from $0.0005 |
-| `map` | every URL of a site from sitemaps + homepage links, with totals | $0.0005 |
-| `crawl` / `crawl_status` | async BFS crawl → Markdown per page | $0.0003/page |
-| `seo_audit` | no-JS vs rendered view of a URL, diffed, plus bot-facing meta | $0.0012 |
-| `list_collectors` | the catalogue: schemas, examples, health, your unit price | free |
-| `run_collector` | run one Collector on a semantic input | from $0.0004/row |
-| `collector_run_status` | one run and its delivered rows | free |
+- "Scrape the pricing page at example.com and give me the plans and prices."
+- "Search Google Shopping for 'nintendo switch oled' in the US and list the cheapest 5."
+- "Map docs.example.com, then crawl only the /guides/ pages and summarize them."
+- "List my proxy plans and generate 5 sticky US residential proxies as socks5 URLs."
+- "Get me a rotating mobile proxy in Germany and whitelist my server IP 203.0.113.7."
 
-Everything is pay-per-success: a call that fails costs nothing.
+## Standalone variant
 
-## Try it without a client
-
-```bash
-node smoke-test.mjs           # handshake + tools/list, no API key needed
-```
-
-Or drive it by hand — it is newline-delimited JSON-RPC on stdin:
-
-```bash
-printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cli","version":"1"}}}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  | node server.mjs
-```
-
-## Prompts that work well
-
-- *"Map quanticdata.io, then scrape the five most recent blog posts and summarise the themes."*
-- *"Search for `serp api pricing` in the US and Germany and tell me how the top ten differ."*
-- *"Run an SEO audit on our pricing page — is it indexable without JavaScript?"*
-- *"Use `list_collectors`, then pull 40 dental clinics in Austin with `local_business_leads`."*
-
-The last one is the pattern worth internalising: let the agent read the catalogue first, then
-pick the collector. The schemas are published precisely so a model can choose correctly.
-
-## Configuration
-
-| Variable | Default | Notes |
-|---|---|---|
-| `QUANTICDATA_API_KEY` | — | required; keys look like `qd_live_…` |
-| `QUANTICDATA_API_BASE` | `https://api.quanticdata.io/v1` | point it elsewhere for a proxy or a staging host |
-
-Errors from the API come back as tool results with `isError: true` rather than protocol errors,
-so the model can read the message and correct itself instead of the conversation dying.
-
-## Related
-
-- [MCP server page](https://quanticdata.io/mcp-server/) · [Documentation](https://quanticdata.io/docs/)
-- [How MCP servers work](https://quanticdata.io/blog/how-mcp-servers-work/) · [Is an MCP server like an API?](https://quanticdata.io/blog/is-mcp-server-like-an-api/)
-- [How to create an MCP server](https://quanticdata.io/blog/how-to-create-an-mcp-server/) · [How to use MCP in Cursor](https://quanticdata.io/blog/how-to-use-mcp-in-cursor/)
-- [Web Data API for AI](https://quanticdata.io/web-data-api-for-ai/) · [Browser AI agents](https://quanticdata.io/browser-ai/)
-
-MIT licensed.
+`standalone/server.mjs` is a single-file, zero-dependency version of this server for environments where npx is unavailable — same tools, same API.

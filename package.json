@@ -1,15 +1,53 @@
 {
-  "name": "quanticdata-mcp-server",
-  "version": "1.0.0",
-  "description": "Single-file MCP server for the QuanticData Data APIs — scrape, search, map, crawl, SEO audit and 31 ready-made collectors for Claude, Cursor and any MCP client.",
+  "name": "quanticdata-mcp",
+  "version": "0.8.1",
+  "mcpName": "io.github.quantumproxies/quanticdata-mcp",
+  "description": "MCP server for the QuanticData API — scrape, search, map, crawl the web and pull residential/datacenter/mobile proxies for AI agents. Connect QuanticData to Claude, Cursor, and any MCP client.",
   "type": "module",
-  "main": "server.mjs",
-  "bin": { "quanticdata-mcp-server": "server.mjs" },
-  "scripts": {
-    "start": "node server.mjs",
-    "test": "node smoke-test.mjs"
+  "bin": {
+    "quanticdata-mcp": "dist/index.js"
   },
-  "engines": { "node": ">=18" },
-  "keywords": ["mcp", "model-context-protocol", "claude", "cursor", "web-scraping", "serp-api", "ai-agents"],
-  "license": "MIT"
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "sync": "./sync-from-scraper-mcp.sh",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "scraper",
+    "proxy",
+    "quanticdata",
+    "claude",
+    "cursor",
+    "web-scraping",
+    "serp",
+    "crawl",
+    "residential-proxies",
+    "ai-agents"
+  ],
+  "author": "QuanticData <support@quanticdata.io> (https://quanticdata.io)",
+  "license": "MIT",
+  "homepage": "https://quanticdata.io/mcp-server",
+  "bugs": {
+    "email": "support@quanticdata.io"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.6.3"
+  }
 }
