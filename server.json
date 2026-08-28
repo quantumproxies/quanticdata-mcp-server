@@ -1,0 +1,35 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.quantumproxies/quanticdata-mcp",
+  "description": "Live web access for agents: scrape, SERP search, crawl/map, 74 collectors, datasets, proxies.",
+  "version": "0.9.1",
+  "repository": {
+    "url": "https://github.com/quantumproxies/quanticdata-mcp-server",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "quanticdata-mcp",
+      "version": "0.9.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "QUANTICDATA_API_KEY",
+          "description": "API key from https://app.quanticdata.io/api-keys \u2014 $2 of free API usage every month, no card required",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://api.quanticdata.io/mcp"
+    }
+  ]
+}
