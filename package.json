@@ -1,6 +1,6 @@
 {
   "name": "quanticdata-mcp",
-  "version": "0.9.1",
+  "version": "0.11.3",
   "mcpName": "io.github.quantumproxies/quanticdata-mcp",
   "description": "MCP server for the QuanticData API — scrape, search, map, crawl the web and pull residential/datacenter/mobile proxies for AI agents. Connect QuanticData to Claude, Cursor, and any MCP client.",
   "type": "module",
@@ -45,6 +45,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@posthog/mcp": "^0.16.0",
+    "posthog-node": "^5.21.2",
     "zod": "^3.23.8"
   },
   "devDependencies": {

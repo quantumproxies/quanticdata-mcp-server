@@ -1,8 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.quantumproxies/quanticdata-mcp",
-  "description": "Live web access for agents: scrape, SERP search, crawl/map, 74 collectors, datasets, proxies.",
-  "version": "0.9.2",
+  "description": "Live web access for agents: scrape, SERP search, crawl/map, 100+ collectors, datasets, proxies.",
+  "version": "0.11.3",
   "repository": {
     "url": "https://github.com/quantumproxies/quanticdata-mcp-server",
     "source": "github"
@@ -12,14 +12,14 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "quanticdata-mcp",
-      "version": "0.9.1",
+      "version": "0.11.3",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
           "name": "QUANTICDATA_API_KEY",
-          "description": "API key from https://app.quanticdata.io/api-keys \u2014 $2 of free API usage every month, no card required",
+          "description": "API key from https://app.quanticdata.io/api-keys — $2 of free API usage every month, no card required",
           "isRequired": true,
           "isSecret": true
         }
@@ -27,15 +27,15 @@
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/quantumproxies/quanticdata-mcp-server/releases/download/v0.9.1/quanticdata-0.9.1.mcpb",
-      "fileSha256": "dc6498416c1870dccd9f86a3d22106f7e0f76991a4ca1db2858c504532d51225",
+      "identifier": "https://github.com/quantumproxies/quanticdata-mcp-server/releases/download/v0.11.3/quanticdata-0.11.3.mcpb",
+      "fileSha256": "841620fe95cccc121fea94acef463ffea3e66eef54d46f13bdf1340ad2352e73",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
           "name": "QUANTICDATA_API_KEY",
-          "description": "API key from https://app.quanticdata.io/api-keys \u2014 $2 of free API usage every month, no card required",
+          "description": "API key from https://app.quanticdata.io/api-keys — $2 of free API usage every month, no card required",
           "isRequired": true,
           "isSecret": true
         }
@@ -45,7 +45,16 @@
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://api.quanticdata.io/mcp"
+      "url": "https://api.quanticdata.io/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Optional when your client supports MCP OAuth sign-in: it opens the QuanticData sign-in page and connects your account without a key. Otherwise 'Bearer <your API key>'.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
     }
   ]
 }
