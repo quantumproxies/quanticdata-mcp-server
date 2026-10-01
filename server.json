@@ -27,8 +27,8 @@
     },
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/quantumproxies/quanticdata-mcp-server/releases/download/v0.11.3/quanticdata-0.11.3.mcpb",
-      "fileSha256": "841620fe95cccc121fea94acef463ffea3e66eef54d46f13bdf1340ad2352e73",
+      "identifier": "https://github.com/quantumproxies/quanticdata-mcp-server/releases/download/v0.11.4/quanticdata-0.11.4.mcpb",
+      "fileSha256": "23203479e91683f9113117323194d002fb6a98dce4c9c6f743652a87c61dbd62",
       "transport": {
         "type": "stdio"
       },
