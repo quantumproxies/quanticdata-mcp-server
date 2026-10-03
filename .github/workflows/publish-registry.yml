@@ -1,0 +1,23 @@
+name: Publish to MCP Registry
+
+# Manual only: publishes server.json to registry.modelcontextprotocol.io.
+# GitHub OIDC from this org repo grants io.github.quantumproxies/*, so no
+# stored token or interactive login is needed.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mcp-publisher
+        run: |
+          curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+      - run: ./mcp-publisher validate
+      - run: ./mcp-publisher login github-oidc
+      - run: ./mcp-publisher publish
