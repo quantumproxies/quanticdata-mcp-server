@@ -6,10 +6,12 @@ QuanticData MCP server without human back-and-forth. There are two transports.
 extra network config. Use Option B (remote HTTP) only if the user explicitly
 wants the hosted endpoint.
 
-The server exposes **25 tools** for live web access: `scrape`, `seo_audit`,
-`search`, `search_and_read`, `search_bulk`, `map`, `crawl`, `batch`,
-`create_dataset`, the parser-preset tools, the 74 `*_collector*` tools,
-`list_proxies`, `generate_proxies`, `proxy_locations`, and `whitelist_ip`.
+The server exposes **29 tools** for live web access: `scrape`, `batch`,
+`read_video`, `search`, `search_and_read`, `search_bulk`, `map`, `crawl`,
+`unlock`, `seo_audit`, `ai_visibility`, the collector tools (`list_collectors`,
+`run_collector`, over 100 ready-made collectors), `create_dataset`, the
+parser-preset tools, `list_proxies`, `generate_proxies`, `proxy_locations`, and
+`whitelist_ip`.
 
 ## Prerequisites
 

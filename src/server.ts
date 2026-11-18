@@ -176,6 +176,82 @@ const CREATE_ACCOUNT_PROMPT =
   " 3) paste it into this connector as the Authorization: Bearer <key> header (X-Api-Key works too) and reconnect.\n\n" +
   "End with the register link on its own line.";
 
+// ── Server instructions (every session) ─────────────────────────────────────
+// Read by the model at initialize (Claude puts them in its system prompt).
+// Up to 0.11.10 only keyless sessions got any, and the hosted endpoint stopped
+// serving keyless sessions with OAuth: no session had instructions at all.
+// They say what this connector is, by name — some clients show its tools only
+// as `mcp__<id>__search`, so a user's "use QuanticData" had nothing to
+// match — and which of its own tools fits which job. The directories forbid
+// steering the model away from other software's tools (Anthropic Software
+// Directory Policy §2.C-2.E; OpenAI plugin guidelines on model-readable
+// fields), so nothing here compares this server with another tool or asks the
+// model to prefer it. Making it the default is the user's choice: the MCP docs
+// page says how.
+
+/** Every tool this server registers, in tools/list order (test/instructions.test.ts keeps it in step). */
+export const TOOL_NAMES = [
+  "search_and_read",
+  "search",
+  "scrape",
+  "unlock",
+  "generate_parser",
+  "save_parser_preset",
+  "list_parser_presets",
+  "parser_preset_stats",
+  "heal_parser_preset",
+  "seo_audit",
+  "ai_visibility",
+  "read_video",
+  "map",
+  "crawl",
+  "crawl_status",
+  "batch",
+  "batch_status",
+  "search_bulk",
+  "search_bulk_status",
+  "create_dataset",
+  "dataset_status",
+  "list_proxies",
+  "generate_proxies",
+  "proxy_locations",
+  "whitelist_ip",
+  "list_collectors",
+  "run_collector",
+  "collector_run_status",
+  "report",
+] as const;
+
+/**
+ * One line per job. `{name}` marks a tool. A sentence naming a tool this
+ * session does not have (QUANTICDATA_TOOLS / ?tools=) is dropped, and so is
+ * a line left with no tool, so a subset never hears about a tool it cannot call.
+ */
+const ROUTING: string[] = [
+  "A question to answer or a topic to research from current web pages: {search_and_read}. It searches Google, Bing or DuckDuckGo, reads the top results and returns numbered sources with their URLs, ready to cite.",
+  "One known URL (a web page, a PDF, a Word or Excel file): {scrape}. A YouTube video: {read_video}.",
+  "The search results themselves (rankings, ads, rich results) or a vertical such as news, images, shopping, maps and places, jobs, scholar, hotels, flights or Google Trends: {search}.",
+  "Many URLs at once: {batch}. Many result pages for one query: {search_bulk}. The URLs of a whole site: {map}. Every page of a site: {crawl}.",
+  "Data from a known kind of source (local businesses and maps, e-commerce, jobs, public records and more): {list_collectors}, then {run_collector}.",
+  "The proxies of the user's account: {list_proxies}, then {generate_proxies}.",
+];
+
+const toolsIn = (s: string) => [...s.matchAll(/\{([a-z_]+)\}/g)].map((m) => m[1]);
+
+export function routingInstructions(has: (tool: string) => boolean = () => true): string {
+  const lines: string[] = [];
+  for (const line of ROUTING) {
+    const kept = line.split(/(?<=\.) (?=[A-Z])/).filter((s) => toolsIn(s).every(has));
+    if (!kept.some((s) => toolsIn(s).length)) continue;
+    lines.push(`- ${kept.join(" ").replace(/\{([a-z_]+)\}/g, "$1")}`);
+  }
+  return (
+    "QuanticData: live web search and page reading from residential IPs, ready-made data collectors, " +
+    "and the proxies of the user's QuanticData account. Which of its tools fits which job:\n" +
+    lines.join("\n")
+  );
+}
+
 export interface BuildOptions {
   /** API key; falls back to QUANTICDATA_API_KEY. Empty = introspection only (tool calls answer 401). */
   apiKey?: string;
@@ -225,7 +301,7 @@ export interface BuildOptions {
  * La versione la riallinea scripts/sync-version.mjs insieme a quella
  * dichiarata dall'McpServer; il nome lo brandifica quantic-mcp/sync-from-scraper-mcp.sh.
  */
-const MCP_UA_BASE = "quanticdata-mcp/0.11.4";
+const MCP_UA_BASE = "quanticdata-mcp/0.11.13";
 /** The version this build declares (kept in step with package.json by scripts/sync-version.mjs). */
 export const MCP_VERSION = MCP_UA_BASE.split("/")[1] ?? "0.0.0";
 /** QP | QD — which brand this build serves (the sync script rebrands the package name). */
@@ -258,11 +334,48 @@ function hiddenInChatGPT(c: any): boolean {
   return CHATGPT_HIDDEN_COLLECTORS.has(String(c?.slug)) || CHATGPT_HIDDEN_CATEGORIES.has(String(c?.category ?? "").toLowerCase());
 }
 
+/**
+ * search_and_read sources: the address to cite when the API handed back
+ * Google's click wrapper (`https://www.google.com/url?opi=…&q=<opaque token>`)
+ * instead of the result's own URL. The SERP service resolves each wrapper with
+ * one redirect and keeps the wrapper when that redirect does not answer in
+ * time; /ai/search then used it as the source URL (seen live 17/11/2026), so a
+ * model citing its sources linked to Google. The page was still read through
+ * the wrapper, and its own canonical URL comes back in the source's metadata:
+ * that one is cited. Null when the URL is not a wrapper or there is no usable
+ * canonical (then the wrapper stays: it still leads to the page).
+ */
+export function citableInsteadOf(url: unknown, canonical: unknown): string | null {
+  if (typeof url !== "string" || typeof canonical !== "string") return null;
+  const isGoogle = (host: string) => /(^|\.)google\.[a-z]{2,3}(\.[a-z]{2})?$/i.test(host);
+  try {
+    const wrapper = new URL(url);
+    if (!isGoogle(wrapper.hostname) || wrapper.pathname !== "/url") return null;
+    const real = new URL(canonical);
+    if (!/^https?:$/.test(real.protocol) || isGoogle(real.hostname)) return null;
+    return real.href;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Swap a source's URL in the assembled `context`: only its header lines
+ * ("[n] <title, or the URL when there is none>" and "URL: …") change. A wrapper
+ * carries a one-off token, so those exact lines appear nowhere else.
+ */
+function swapSourceUrl(context: string, position: unknown, from: string, to: string): string {
+  return context
+    .split("\n")
+    .map((line) => (line === `URL: ${from}` ? `URL: ${to}` : line === `[${position}] ${from}` ? `[${position}] ${to}` : line))
+    .join("\n");
+}
+
 /** Named tool sets for clients with small context windows. */
 const TOOL_PRESETS: Record<string, string[]> = {
   lite: ["search_and_read"],
-  web: ["search", "search_and_read", "scrape"],
-  research: ["search", "search_and_read", "scrape", "map", "batch", "batch_status"],
+  web: ["search", "search_and_read", "scrape", "read_video"],
+  research: ["search", "search_and_read", "scrape", "read_video", "map", "batch", "batch_status"],
   collectors: ["list_collectors", "run_collector", "collector_run_status"],
   proxies: ["list_proxies", "generate_proxies", "proxy_locations", "whitelist_ip"],
 };
@@ -337,7 +450,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
    * 404 (66 such pageviews on 2026-08-26). A newline is the only terminator they
    * all respect — angle brackets and quotes get swallowed just like parentheses.
    */
-  function transportError(err: unknown, url: string): Error {
+  function transportError(err: unknown, url: string, timeoutMs = 90_000): Error {
     const cause = (err as { cause?: { code?: string; message?: string } })?.cause;
     const code = cause?.code;
     const detail = code ?? cause?.message ?? (err as Error)?.message ?? String(err);
@@ -347,7 +460,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
     else if (code === "ENOTFOUND" || code === "EAI_AGAIN")
       hint = " — host does not resolve. Check QUANTICDATA_API_BASE.";
     else if ((err as Error)?.name === "TimeoutError" || code === "UND_ERR_HEADERS_TIMEOUT")
-      hint = " — request timed out after 90s.";
+      hint = ` — request timed out after ${timeoutMs / 1000}s.`;
     else if (code === "CERT_HAS_EXPIRED" || code?.startsWith?.("ERR_TLS"))
       hint = " — TLS handshake failed.";
     return new Error(
@@ -357,7 +470,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
     );
   }
 
-  async function callApi(path: string, body: unknown, method: "POST" | "GET" | "DELETE" = "POST"): Promise<ApiResult> {
+  async function callApi(path: string, body: unknown, method: "POST" | "GET" | "DELETE" = "POST", timeoutMs = 90_000): Promise<ApiResult> {
     if (!API_KEY && !KEYLESS) {
       return { ok: false, status: 401, data: { message: KEYLESS_MESSAGE } };
     }
@@ -383,10 +496,10 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
           "User-Agent": userAgent(),
         },
         body: method === "GET" ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(90_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
-      throw transportError(err, url);
+      throw transportError(err, url, timeoutMs);
     }
     let data: any = null;
     const ctype = res.headers.get("content-type") || "";
@@ -472,8 +585,17 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
     if (Array.isArray(v)) return v.length === 0;
     return typeof v === "object" && Object.keys(v as object).length === 0;
   }
+  /**
+   * What was asked and what was served lead the answer: search_parameters
+   * (device, browser asked) and search_metadata (served_device,
+   * served_platform, served_browser) sat after up to 100 organic results, where
+   * an agent comparing devices never got to them. A bulk job keeps its status
+   * fields first.
+   */
+  const SERP_LEAD_KEYS = ["id", "status", "query", "total", "completed", "failed", "error", "search_parameters", "search_metadata"];
   function pruneSerp(p: any): any {
     const out: Record<string, unknown> = {};
+    for (const key of SERP_LEAD_KEYS) if (key in p) out[key] = undefined;
     for (const [key, value] of Object.entries(p)) {
       if (isEmptyValue(value)) continue;
       if (key === "general" && p.search_parameters) continue;
@@ -486,7 +608,57 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
           )
         : value;
     }
+    for (const key of SERP_LEAD_KEYS) if (out[key] === undefined) delete out[key];
     return out;
+  }
+
+  /**
+   * SERP device and browser (24/10/2026). Google is searched as one real
+   * browser: iPhone = Safari, Android = Chrome, desktop = Chrome, Edge, Safari
+   * (macOS) or Firefox. The API quietly drops a `browser` the device has none
+   * of (Firefox on a phone, Chrome on the iPhone); say so instead, with the fix.
+   */
+  function serpPairError(device?: string, browser?: string): string | undefined {
+    if (!browser || !device || device === "desktop") return undefined;
+    const desktopOnly = "Firefox is desktop only (device 'desktop').";
+    if (device === "mobile") {
+      return browser === "firefox"
+        ? `browser 'firefox' does not exist on a phone: with device 'mobile' use browser 'safari' (iPhone) or 'chrome' (Android), or omit it. ${desktopOnly}`
+        : undefined;
+    }
+    if (device === "ios" && browser !== "safari") {
+      return `device 'ios' is an iPhone with Safari: omit browser or use 'safari'. ${browser === "chrome" ? "For Chrome on a phone use device 'android'." : desktopOnly}`;
+    }
+    if (device === "android" && browser !== "chrome") {
+      return `device 'android' is an Android phone with Chrome: omit browser or use 'chrome'. ${browser === "safari" ? "For Safari on a phone use device 'ios'." : desktopOnly}`;
+    }
+    return undefined;
+  }
+  // Keep the legacy text blocks and expose the same answer to hosts that read
+  // structuredContent. In particular, ChatGPT can otherwise receive {}.
+  function textResult(text: string, isError = false) {
+    return {
+      content: [{ type: "text" as const, text }],
+      structuredContent: isError ? { error: text } : { text },
+      ...(isError ? { isError: true } : {}),
+    };
+  }
+
+  function refusal(text: string) {
+    return textResult(`Error: ${text}`, true);
+  }
+
+  /**
+   * One phone per query (owner, 24/10/2026): every page of a query comes from
+   * one device, queries rotate. A search_bulk call is one query, so the phone is
+   * drawn here per call (Safari = iPhone, Chrome = Android, else at random) and
+   * each new call draws again. The service does the same since 24/10 (one
+   * identity per bulk job); this keeps it true against an older service.
+   */
+  function pinBulkPhone<T extends { device?: string; browser?: string; engine?: string }>(args: T): T {
+    if (args.device !== "mobile" || (args.engine && args.engine !== "google")) return args;
+    const device = args.browser === "safari" ? "ios" : args.browser === "chrome" ? "android" : Math.random() < 0.5 ? "ios" : "android";
+    return { ...args, device };
   }
 
   function presetNotFound(status: number, message: string): string | undefined {
@@ -496,37 +668,42 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
   }
 
   /** Unwrap the API envelope { message, payload } and format for the model. */
-  function toContent(result: ApiResult): { content: Array<{ type: "text"; text: string }>; isError?: boolean } {
+  function toContent(result: ApiResult): { content: Array<{ type: "text"; text: string }>; structuredContent: Record<string, unknown>; isError?: boolean } {
     if (!result.ok) {
       const msg = result.data?.message || result.data?.error || `Request failed (HTTP ${result.status})`;
       // Keyless refusals already carry the whole explanation (what needs an
       // account, the register link): relay them as they are.
       const code = result.data?.payload?.code;
       if (code === "account_required" || code === "anonymous_limit") {
-        return { content: [{ type: "text", text: msg }], isError: true };
+        return textResult(msg, true);
       }
       // Auth and credit failures are the two the caller can actually fix, and
       // the two where a bare upstream string ("Invalid API key") ends the
       // evaluation. Everything else passes through unchanged.
       if (result.status === 401) {
         const text = msg === KEYLESS_MESSAGE ? msg : rejectedKeyMessage(msg, opts.transport ?? "stdio");
-        return { content: [{ type: "text", text }], isError: true };
+        return textResult(text, true);
       }
       if (result.status === 402) {
-        return { content: [{ type: "text", text: outOfCreditMessage(msg, opts.transport ?? "stdio") }], isError: true };
+        return textResult(outOfCreditMessage(msg, opts.transport ?? "stdio"), true);
       }
-      return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
+      return textResult(`Error: ${msg}`, true);
     }
     const payload = result.data?.payload ?? result.data;
     let text = typeof payload === "string" ? payload : stringifyForModel(payload);
+    const structuredContent: Record<string, unknown> =
+      payload !== null && typeof payload === "object" && !Array.isArray(payload)
+        ? { ...payload }
+        : typeof payload === "string" ? { text: payload } : { result: payload ?? null };
     // Keyless: the account pitch lives in the server instructions; the result
     // carries a reminder only when the per-minute allowance is nearly gone.
     const k = result.keyless;
     if (k && k.remaining !== null && k.remaining <= 2) {
       const left = k.limit !== null ? `${k.remaining} of ${k.limit} requests left this minute. ` : "";
       text += `\n\n— Keyless tier: ${left}${KEYLESS_UPGRADE}`;
+      structuredContent._quanticdataNotice = `Keyless tier: ${left}${KEYLESS_UPGRADE}`;
     }
-    return { content: [{ type: "text", text }] };
+    return { content: [{ type: "text", text }], structuredContent };
   }
 
   /**
@@ -551,7 +728,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
         signal: AbortSignal.timeout(30_000),
       });
     } catch (err) {
-      throw transportError(err, url);
+      throw transportError(err, url, 30_000);
     }
     let data: any = null;
     try {
@@ -565,10 +742,17 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
   // Riallineato da scripts/sync-version.mjs, che `npm run build` esegue sempre:
   // `npm version` non tocca questo file, e il bundle MCPB ha già dichiarato
   // 0.9.0 con package.json a 0.9.1.
+  // Tool subset (QUANTICDATA_TOOLS=web, or ?tools=web on the hosted URL),
+  // applied at the end; known here so the instructions name only what is served.
+  // A list that matches no tool keeps every tool, as before.
+  const wanted = parseToolList(opts.tools ?? process.env.QUANTICDATA_TOOLS);
+  const subset = wanted && TOOL_NAMES.some((name) => wanted.has(name)) ? wanted : null;
+  const routing = routingInstructions((tool) => !subset || subset.has(tool));
   const server = new McpServer(
-    { name: "quanticdata", version: "0.11.4" },
-    // Keyless sessions get the tier explained where the model reads it first.
-    KEYLESS ? { instructions: KEYLESS_INSTRUCTIONS } : undefined
+    { name: "quanticdata", version: "0.11.13" },
+    // Keyless sessions get the tier explained where the model reads it first,
+    // then the same tool routing as everyone else.
+    { instructions: KEYLESS ? `${KEYLESS_INSTRUCTIONS}\n\n${routing}` : routing }
   );
   // PostHog MCP Analytics (src/analytics.ts): no-op without POSTHOG_PROJECT_TOKEN.
   instrumentServer(server);
@@ -583,11 +767,228 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
     );
   }
 
-  // ── scrape (extract) ────────────────────────────────────────────────────────
-  server.tool(
-    "scrape",
-    "Use this when the user wants the content of one web page. Fetches the page from a residential IP and returns it as clean Markdown (or HTML/text). It tries a plain HTTP request with a Chrome-compatible TLS profile first and uses a headless browser only when the page needs JavaScript or the plain request is refused. Optionally runs structured extraction (CSS selectors or a stored preset) or AI extraction (natural-language prompt). Markdown keeps the complete page by default (content_mode 'smart': everything except nav/footer/cookie banners, with GFM tables and absolute links); use format 'html' to inspect the raw no-JS page. Optional browser `actions` (click, type) can submit forms on the target site. Use it only for pages the user is permitted to access.",
+  // ── search_and_read (SERP → citation-ready AI context) ─────────────────────
+  const searchAndRead = server.tool(
+    "search_and_read",
+    "QuanticData: searches the live web, fetches the top organic pages as clean Markdown and returns citation-ready numbered sources plus one token-bounded `context` string ready for an AI prompt. Use this to answer a question or research a topic; use `search` when raw SERP structure or a specialized vertical is needed.",
     {
+      query: z.string().min(1).describe("The research/search query"),
+      engine: z.enum(["google", "bing", "duckduckgo"]).optional().describe("Search engine (default google)"),
+      country: z.string().length(2).optional().describe("ISO country code for search and proxy geo"),
+      lang: z.string().max(10).optional().describe("Search UI language, e.g. 'en' or 'it'"),
+      top_n: z
+        .number()
+        .int()
+        .min(1)
+        .max(5)
+        .optional()
+        .describe("Top organic pages to fetch (default 3, max 5)"),
+      max_tokens: z
+        .number()
+        .int()
+        .min(500)
+        .max(50_000)
+        .optional()
+        .describe("Maximum estimated tokens in the assembled context (default 8000)"),
+      fetch_content: z
+        .boolean()
+        .optional()
+        .describe("False returns snippet-only context without fetching result pages"),
+    },
+    {
+      title: "Search the web and read results",
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: true,
+    },
+    async (args) =>
+      // Every fetched page used to travel twice: once in sources[n].content and
+      // again, verbatim, inside `context` under its [n] marker — double the
+      // tokens for the same text. `context` is the part meant for the model, so
+      // sources keep the citation fields and drop the copy (and the raw JSON-LD).
+      toContent(
+        // The API budgets 70s for search, then 35s for parallel page reads,
+        // with a 120s route limit. Do not abort that workflow at the usual 90s.
+        mapPayload(await callApi("/ai/search", args, "POST", 125_000), (p) => {
+          if (typeof p.context !== "string" || !p.context || !Array.isArray(p.sources)) return p;
+          let context: string = p.context;
+          const sources = p.sources.map((s: any) => {
+            if (!s || typeof s !== "object") return s;
+            const { content: _content, ...rest } = s;
+            // A Google click wrapper in place of the source's address: cite the
+            // page's own canonical URL instead (see citableInsteadOf).
+            const real = citableInsteadOf(rest.url, rest.metadata?.canonical);
+            if (real) {
+              context = swapSourceUrl(context, rest.position, rest.url, real);
+              rest.url = real;
+            }
+            if (rest.metadata && typeof rest.metadata === "object") {
+              const { jsonLd: _jsonLd, ...meta } = rest.metadata;
+              rest.metadata = meta;
+            }
+            return rest;
+          });
+          return {
+            ...p,
+            sources,
+            context,
+            note: "Each source's page text is in `context`, under the same [n] number as its `position`.",
+          };
+        })
+      )
+  );
+  // Claude Code defers MCP tools until the model searches for them, so a plain
+  // question met only the client's own web search, loaded from the start.
+  // `anthropic/alwaysLoad` (documented at code.claude.com/docs/en/mcp, "Mark a
+  // tool to load upfront") loads this one tool upfront, about 360 tokens; the
+  // user can still defer it with "alwaysLoad": false on the server entry. Not
+  // on a tool subset (it is small already, and lite is published at ~360
+  // tokens) and not in ChatGPT, which does not read the key.
+  if (!subset && !CHATGPT) searchAndRead.update({ _meta: { "anthropic/alwaysLoad": true } });
+
+  // ── search (serp) ───────────────────────────────────────────────────────────
+  server.tool(
+    "search",
+    "QuanticData search engine results: runs a Google, Bing or DuckDuckGo search through a residential proxy and returns the results page as structured data, for web search or a vertical: news, images, videos, shopping and products, maps and places with details and reviews, jobs, scholar, hotels, flights, events, Lens, autocomplete and Google Trends. Use this when the user wants the search results themselves or one of these verticals; to answer a question from the pages behind them, use search_and_read. Bing supports web, shopping, images, news, videos, places/maps and autocomplete over HTTP, including Copilot AI answers and citations when Bing returns them. Google web search also parses rich blocks directly from its HTTP response. For Google Trends (search_type 'trends') put one term in `query` and up to 4 more in `compare` to get them on the same 0-100 scale; a comma list in `query` is NOT a comparison, it is searched as one literal term. search_parameters and search_metadata lead the answer (served_device, served_platform, served_browser). Comparing SERPs? Set `location` or `uule`: Google ranks by city, else by the exit IP, which changes per request.",
+    {
+      query: z
+        .string()
+        .optional()
+        .describe("The search query (optional for place_details/product/flights/lens/reviews, which are ID/URL-addressed). Trends: a single term — a comma list here is one literal term, not a comparison; use `compare`."),
+      engine: z.enum(["google", "bing", "duckduckgo"]).optional().describe("Search engine (default google)"),
+      search_type: z
+        .enum([
+          "search", "shopping", "images", "news", "places", "maps", "videos", "scholar", "jobs", "autocomplete",
+          "place_details", "hotels", "flights", "events", "product", "lens", "reviews", "trends",
+        ])
+        .optional()
+        .describe(
+          "Vertical (default search). Bing supports shopping/images/news/videos/places/maps/autocomplete. Google additionally supports scholar/jobs/place_details/hotels/flights/events/product/lens/reviews; maps accepts gps_coordinates, place_details uses place_id, and reviews uses data_id."
+        ),
+      country: z.string().length(2).optional().describe("ISO country code, e.g. 'us'"),
+      lang: z.string().max(10).optional().describe("Search UI language, e.g. 'en' or 'it'"),
+      render: z
+        .boolean()
+        .optional()
+        .describe("Force browser rendering where supported; Google/Bing web search rich blocks are parsed over HTTP"),
+      device: z
+        .enum(["desktop", "mobile", "ios", "android"])
+        .optional()
+        .describe(
+          "desktop (default) | mobile = iPhone Safari or Android Chrome, one per query: every page of num>10 from it, queries rotate | ios = iPhone Safari | android = Android Chrome. Bing serves one mobile page to any phone."
+        ),
+      page: z.number().int().min(1).optional().describe("Result page, 1-based (default 1). The response's pagination.available_pages lists which pages exist; use search_bulk to fetch many pages at once."),
+      start: z.number().int().min(0).optional().describe("Result offset alias (0, 10, 20…)"),
+      num: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe(
+          "How many organic results to aim for (default 10, max 100). Google serves ~10 per page, so a larger num is satisfied by fetching consecutive pages and merging them — it is NOT ignored. `search_metadata.search_url` is necessarily the first page's URL and therefore shows num=<page size>; `search_metadata.paging` reports what was actually requested, the page size, and how many pages were fetched. Getting fewer results than requested means Google ran out, not that num was dropped. Use `page` to address one specific page, or search_bulk for many queries."
+        ),
+      location: z
+        .string()
+        .optional()
+        .describe("Search from this place, e.g. 'Milan, Italy' (Google uule, encoded server-side). Set it when comparing SERPs: Google ranks by city."),
+      timeframe: z
+        .string()
+        .optional()
+        .describe(
+          "Trends only: Google timeframe token — 'today 12-m' (default), 'now 7-d', or an explicit 'YYYY-MM-DD YYYY-MM-DD' range"
+        ),
+      compare: z
+        .array(z.string().min(1).max(100))
+        .max(4)
+        .optional()
+        .describe("Trends only: up to 4 more terms to compare against `query` on the same 0-100 scale"),
+      uule: z
+        .string()
+        .optional()
+        .describe("Geo token: encoded uule, or raw coordinates 'lat,lon' / 'lat,lon,radius_m' (encoded server-side)"),
+      safe: z.enum(["active", "off"]).optional().describe("Google SafeSearch setting"),
+      nfpr: z.boolean().optional().describe("Disable Google spelling correction"),
+      wait_for: z
+        .string()
+        .max(512)
+        .optional()
+        .describe("Rendered path: wait for this CSS selector before parsing late panels"),
+      browser: z
+        .enum(["chrome", "firefox", "safari"])
+        .optional()
+        .describe(
+          "chrome (Windows/macOS; Android on a phone) | safari (macOS; iPhone on a phone) | firefox (desktop only). Omit to rotate (desktop: Chrome, Edge, Safari, Firefox). Google web/news/videos and Bing desktop. A device without that browser (e.g. android with safari) is refused."
+        ),
+      google_params: z
+        .record(z.union([z.string(), z.number()]))
+        .optional()
+        .describe("Additional Google query parameters not modeled above"),
+      place_id: z.string().optional().describe("Google Maps place id for place_details — the hex '0x…:0x…' fid from maps/places results, a 'ChIJ…' place id or a numeric cid all work; served from Maps' place card over HTTP (name, address, phone, website, rating, reviews, category, weekly hours, open state) in about a second"),
+      data_id: z
+        .string()
+        .optional()
+        .describe("Maps data id, hex fid '0x…:0x…' (from maps/place_details results) — required for reviews"),
+      product_ids: z
+        .boolean()
+        .optional()
+        .describe("shopping only: render the Shopping grid so each result carries product_id/offer_id (the input of search_type=product). Costs a render; the default no-JS shopping page has no ids."),
+      product_id: z.string().optional().describe("Google Shopping product id (the product_id of a shopping result — the rendered grid carries it) for search_type=product: the seller list with price, old price, discount, stock and delivery per merchant. Without it, pass a query and the first product is opened."),
+      departure_id: z.string().optional().describe("Flights: departure airport IATA code, e.g. 'JFK'"),
+      arrival_id: z.string().optional().describe("Flights: arrival airport IATA code, e.g. 'LAX'"),
+      outbound_date: z.string().optional().describe("Flights: outbound date YYYY-MM-DD"),
+      return_date: z.string().optional().describe("Flights: return date YYYY-MM-DD (omit for one-way)"),
+      check_in_date: z.string().optional().describe("Hotels: check-in date YYYY-MM-DD"),
+      check_out_date: z.string().optional().describe("Hotels: check-out date YYYY-MM-DD"),
+      adults: z.number().int().min(1).max(10).optional().describe("Hotels: number of adults"),
+      children_ages: z
+        .array(z.number().int().min(0).max(17))
+        .optional()
+        .describe("Hotels: children's ages, e.g. [5, 7]"),
+      free_cancellation: z.boolean().optional().describe("Hotels: only offers with free cancellation"),
+      accommodation_type: z
+        .enum(["hotels", "vacation_rentals"])
+        .optional()
+        .describe("Hotels: property kind (default hotels)"),
+      currency: z.string().length(3).optional().describe("Hotels/Flights: price currency, e.g. 'EUR'"),
+      gps_coordinates: z
+        .string()
+        .optional()
+        .describe("Maps: center the search on 'lat,lon' or 'lat,lon,zoom' (zoom 3-21)"),
+      image_url: z.string().optional().describe("Lens: publicly reachable image URL to reverse-search"),
+      exact_matches: z
+        .boolean()
+        .optional()
+        .describe("Lens: return the exact-matches tab (pages using this exact image) instead of visual matches"),
+      sort_by: z
+        .enum(["relevance", "newest", "highest_rating", "lowest_rating"])
+        .optional()
+        .describe("Reviews: sort order (default relevance)"),
+      filter: z.string().optional().describe("Reviews: only reviews whose text contains this keyword"),
+      next_page_token: z
+        .string()
+        .optional()
+        .describe("Reviews: the next_page_token from the previous reviews response's pagination block"),
+    },
+    {
+      title: "Get search engine results",
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: true,
+    },
+    async (args) => {
+      const pair = serpPairError(args.device, args.browser);
+      if (pair) return refusal(pair);
+      return toContent(mapPayload(await callApi("/scraper/serp", args), pruneSerp));
+    }
+  );
+
+  // ── scrape (extract) ────────────────────────────────────────────────────────
+  const SCRAPE_OPENING =
+    "QuanticData page reader: fetches one web page from a residential IP and returns it as clean Markdown (or HTML/text); PDF, Word and Excel files work too. Use this when the user gives a URL or wants the content of one known page; to find pages first, use search_and_read or search. It tries a plain HTTP request with a Chrome-compatible TLS profile first and uses a headless browser only when the page needs JavaScript or the plain request is refused.";
+  const SCRAPE_MARKDOWN =
+    " Markdown keeps the complete page by default (content_mode 'smart': everything except nav/footer/cookie banners, with GFM tables and absolute links); use format 'html' to inspect the raw no-JS page.";
+  const scrapeFull = {
       url: z
         .string()
         .url()
@@ -752,13 +1153,30 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
         .record(z.string())
         .optional()
         .describe("Cookies to send with the request as name→value (e.g. a consent or locale cookie). Only send cookies the user provided for this site."),
-    },
-    {
-      title: "Scrape a web page",
-      readOnlyHint: false,
-      destructiveHint: true,
-      openWorldHint: true,
-    },
+    };
+  // ChatGPT app: a read-only scrape. OpenAI lets ChatGPT Pro (and deep research)
+  // use a custom MCP server with read/fetch permissions only, i.e. the tools
+  // marked readOnlyHint: true, and browser actions (click, type), the user's
+  // cookies and a stored preset (each run is scored and can regenerate it) made
+  // scrape a write tool: on Pro no tool could read a given page. Without those
+  // three it only reads; every other client keeps the full scrape. (Ported from
+  // claude/mcp-chatgpt-pro-read 9325c9c9e, 21/10/2026.)
+  const { actions: _actions, cookies: _cookies, preset_id: _presetId, ...scrapeRead } = scrapeFull;
+  server.tool(
+    "scrape",
+    CHATGPT
+      ? SCRAPE_OPENING +
+          " Optionally runs structured extraction (CSS selectors) or AI extraction (natural-language prompt)." +
+          SCRAPE_MARKDOWN +
+          " It only reads: no clicks or typing on the site, no logins or cookies, so it works on content that is publicly accessible. Use it only for pages the user is permitted to access."
+      : SCRAPE_OPENING +
+          " Optionally runs structured extraction (CSS selectors or a stored preset) or AI extraction (natural-language prompt)." +
+          SCRAPE_MARKDOWN +
+          " Optional browser `actions` (click, type) can submit forms on the target site. Use it only for pages the user is permitted to access.",
+    (CHATGPT ? scrapeRead : scrapeFull) as typeof scrapeFull,
+    CHATGPT
+      ? { title: "Read a web page", readOnlyHint: true, destructiveHint: false, openWorldHint: true }
+      : { title: "Scrape a web page", readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     async (args) => {
       // fetch_resource is exposed as a flat string for ergonomics; the API takes
       // it as an ordered action, which must come last so nothing runs after the
@@ -767,7 +1185,11 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
         fetch_resource?: string;
         preset_id?: string;
       };
-      if (preset_id) (rest as Record<string, unknown>).presetId = preset_id;
+      // The read-only scrape enforces what its schema promises, whatever the client sends.
+      if (CHATGPT) {
+        delete rest.actions;
+        delete rest.cookies;
+      } else if (preset_id) (rest as Record<string, unknown>).presetId = preset_id;
       const body = fetch_resource
         ? {
             ...rest,
@@ -908,22 +1330,16 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
       // balance, the free allowance resets") sent people to the wrong page.
       if (result.status === 402 && result.data?.payload?.tier) {
         const msg = result.data?.message || "Web Unlocker bandwidth exhausted.";
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text:
-                `${msg}\n\nThe Web Unlocker spends its own prepaid GB (one balance per tier: premium, mobile), ` +
-                "separate from the pay-as-you-go API credit that scrape and search use — scrape is the alternative " +
-                "that works on that credit. " +
-                (opts.transport === "http"
-                  ? // Plugin-directory rule: informational page only, no purchase link.
-                    `Unlocker prices are listed at:\n   ${PRICING_URL}`
-                  : `Unlocker GB are bought here:\n   ${UNLOCK_URL}`),
-            },
-          ],
-          isError: true,
-        };
+        return textResult(
+          `${msg}\n\nThe Web Unlocker spends its own prepaid GB (one balance per tier: premium, mobile), ` +
+          "separate from the pay-as-you-go API credit that scrape and search use — scrape is the alternative " +
+          "that works on that credit. " +
+          (opts.transport === "http"
+            ? // Plugin-directory rule: informational page only, no purchase link.
+              `Unlocker prices are listed at:\n   ${PRICING_URL}`
+            : `Unlocker GB are bought here:\n   ${UNLOCK_URL}`),
+          true,
+        );
       }
       const payload = result.ok ? result.data?.payload : undefined;
       if (
@@ -1145,184 +1561,60 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
       )
   );
 
-  // ── search (serp) ───────────────────────────────────────────────────────────
+  // ── read_video (transcript in the spoken language + frames at the moments that matter) ──
   server.tool(
-    "search",
-    "Run structured Google, Bing or DuckDuckGo searches through a residential proxy. Bing supports web, shopping, images, news, videos, places/maps and autocomplete over HTTP, including Copilot AI answers and citations when Bing returns them. Google web search also parses rich blocks directly from its HTTP response.",
+    "read_video",
+    "Use this when the user wants to know what a YouTube video says or shows: summarise it, find where something is said, check a claim, pull prices or products out of a review. Returns one timeline to read in order: the video's metadata and description, its chapters, the transcript in the language that is spoken (not a translation; you translate if needed) stamped [m:ss], and small frames placed where the speaker points at the screen ('as you can see', 'come vedete'), where a price is said, at each chapter, and every so often in between. Frames are low resolution (usually 160x90): good for seeing the scene and objects, not for reading small text. Long videos: pass start/end to read a part, or max_tokens to bound the text.",
     {
-      query: z
-        .string()
-        .optional()
-        .describe("The search query (optional for place_details/product/flights/lens/reviews, which are ID/URL-addressed)"),
-      engine: z.enum(["google", "bing", "duckduckgo"]).optional().describe("Search engine (default google)"),
-      search_type: z
-        .enum([
-          "search", "shopping", "images", "news", "places", "maps", "videos", "scholar", "jobs", "autocomplete",
-          "place_details", "hotels", "flights", "events", "product", "lens", "reviews", "trends",
-        ])
-        .optional()
-        .describe(
-          "Vertical (default search). Bing supports shopping/images/news/videos/places/maps/autocomplete. Google additionally supports scholar/jobs/place_details/hotels/flights/events/product/lens/reviews; maps accepts gps_coordinates, place_details uses place_id, and reviews uses data_id."
-        ),
-      country: z.string().length(2).optional().describe("ISO country code, e.g. 'us'"),
-      lang: z.string().max(10).optional().describe("Search UI language, e.g. 'en' or 'it'"),
-      render: z
-        .boolean()
-        .optional()
-        .describe("Force browser rendering where supported; Google/Bing web search rich blocks are parsed over HTTP"),
-      device: z.enum(["desktop", "mobile"]).optional().describe("SERP device shape (default desktop)"),
-      page: z.number().int().min(1).optional().describe("Result page, 1-based (default 1). The response's pagination.available_pages lists which pages exist; use search_bulk to fetch many pages at once."),
-      start: z.number().int().min(0).optional().describe("Result offset alias (0, 10, 20…)"),
-      num: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .optional()
-        .describe(
-          "How many organic results to aim for (default 10, max 100). Google serves ~10 per page, so a larger num is satisfied by fetching consecutive pages and merging them — it is NOT ignored. `search_metadata.search_url` is necessarily the first page's URL and therefore shows num=<page size>; `search_metadata.paging` reports what was actually requested, the page size, and how many pages were fetched. Getting fewer results than requested means Google ran out, not that num was dropped. Use `page` to address one specific page, or search_bulk for many queries."
-        ),
-      location: z
-        .string()
-        .optional()
-        .describe("Search from this location, e.g. 'Milan, Italy' (encoded to Google's uule server-side)"),
-      timeframe: z
-        .string()
-        .optional()
-        .describe(
-          "Trends only: Google timeframe token — 'today 12-m' (default), 'now 7-d', or an explicit 'YYYY-MM-DD YYYY-MM-DD' range"
-        ),
-      uule: z
-        .string()
-        .optional()
-        .describe("Geo token: encoded uule, or raw coordinates 'lat,lon' / 'lat,lon,radius_m' (encoded server-side)"),
-      safe: z.enum(["active", "off"]).optional().describe("Google SafeSearch setting"),
-      nfpr: z.boolean().optional().describe("Disable Google spelling correction"),
-      wait_for: z
-        .string()
-        .max(512)
-        .optional()
-        .describe("Rendered path: wait for this CSS selector before parsing late panels"),
-      browser: z
-        .enum(["chrome", "firefox", "safari"])
-        .optional()
-        .describe("TLS/browser identity for the fetch path"),
-      google_params: z
-        .record(z.union([z.string(), z.number()]))
-        .optional()
-        .describe("Additional Google query parameters not modeled above"),
-      place_id: z.string().optional().describe("Google Maps place id for place_details — the hex '0x…:0x…' fid from maps/places results, a 'ChIJ…' place id or a numeric cid all work; served from Maps' place card over HTTP (name, address, phone, website, rating, reviews, category, weekly hours, open state) in about a second"),
-      data_id: z
-        .string()
-        .optional()
-        .describe("Maps data id, hex fid '0x…:0x…' (from maps/place_details results) — required for reviews"),
-      product_ids: z
-        .boolean()
-        .optional()
-        .describe("shopping only: render the Shopping grid so each result carries product_id/offer_id (the input of search_type=product). Costs a render; the default no-JS shopping page has no ids."),
-      product_id: z.string().optional().describe("Google Shopping product id (the product_id of a shopping result — the rendered grid carries it) for search_type=product: the seller list with price, old price, discount, stock and delivery per merchant. Without it, pass a query and the first product is opened."),
-      departure_id: z.string().optional().describe("Flights: departure airport IATA code, e.g. 'JFK'"),
-      arrival_id: z.string().optional().describe("Flights: arrival airport IATA code, e.g. 'LAX'"),
-      outbound_date: z.string().optional().describe("Flights: outbound date YYYY-MM-DD"),
-      return_date: z.string().optional().describe("Flights: return date YYYY-MM-DD (omit for one-way)"),
-      check_in_date: z.string().optional().describe("Hotels: check-in date YYYY-MM-DD"),
-      check_out_date: z.string().optional().describe("Hotels: check-out date YYYY-MM-DD"),
-      adults: z.number().int().min(1).max(10).optional().describe("Hotels: number of adults"),
-      children_ages: z
-        .array(z.number().int().min(0).max(17))
-        .optional()
-        .describe("Hotels: children's ages, e.g. [5, 7]"),
-      free_cancellation: z.boolean().optional().describe("Hotels: only offers with free cancellation"),
-      accommodation_type: z
-        .enum(["hotels", "vacation_rentals"])
-        .optional()
-        .describe("Hotels: property kind (default hotels)"),
-      currency: z.string().length(3).optional().describe("Hotels/Flights: price currency, e.g. 'EUR'"),
-      gps_coordinates: z
-        .string()
-        .optional()
-        .describe("Maps: center the search on 'lat,lon' or 'lat,lon,zoom' (zoom 3-21)"),
-      image_url: z.string().optional().describe("Lens: publicly reachable image URL to reverse-search"),
-      exact_matches: z
-        .boolean()
-        .optional()
-        .describe("Lens: return the exact-matches tab (pages using this exact image) instead of visual matches"),
-      sort_by: z
-        .enum(["relevance", "newest", "highest_rating", "lowest_rating"])
-        .optional()
-        .describe("Reviews: sort order (default relevance)"),
-      filter: z.string().optional().describe("Reviews: only reviews whose text contains this keyword"),
-      next_page_token: z
-        .string()
-        .optional()
-        .describe("Reviews: the next_page_token from the previous reviews response's pagination block"),
-    },
-    {
-      title: "Search the web",
-      readOnlyHint: true,
-      destructiveHint: false,
-      openWorldHint: true,
-    },
-    async (args) => toContent(mapPayload(await callApi("/scraper/serp", args), pruneSerp))
-  );
-
-  // ── search_and_read (SERP → citation-ready AI context) ─────────────────────
-  server.tool(
-    "search_and_read",
-    "Search the live web, fetch the top organic pages as clean Markdown, and return citation-ready numbered sources plus one token-bounded `context` string ready for an AI prompt. Use this when the goal is answering/researching, and use `search` when raw SERP structure or a specialized vertical is needed.",
-    {
-      query: z.string().min(1).describe("The research/search query"),
-      engine: z.enum(["google", "bing", "duckduckgo"]).optional().describe("Search engine (default google)"),
-      country: z.string().length(2).optional().describe("ISO country code for search and proxy geo"),
-      lang: z.string().max(10).optional().describe("Search UI language, e.g. 'en' or 'it'"),
-      top_n: z
-        .number()
-        .int()
-        .min(1)
+      url: z.string().url().describe("YouTube URL (watch, youtu.be, shorts, embed, live)"),
+      languages: z
+        .array(z.string().min(2).max(12))
         .max(5)
         .optional()
-        .describe("Top organic pages to fetch (default 3, max 5)"),
-      max_tokens: z
-        .number()
-        .int()
-        .min(500)
-        .max(50_000)
-        .optional()
-        .describe("Maximum estimated tokens in the assembled context (default 8000)"),
-      fetch_content: z
-        .boolean()
-        .optional()
-        .describe("False returns snippet-only context without fetching result pages"),
+        .describe("Caption languages to prefer, e.g. ['en']. Leave empty to get the language spoken in the video (recommended: more accurate than a translated track)"),
+      max_frames: z.number().int().min(0).max(30).optional().describe("Frames to include (default 12, 0 = transcript only)"),
+      start: z.union([z.number().min(0), z.string()]).optional().describe("Read from this point: seconds or 'm:ss'"),
+      end: z.union([z.number().min(0), z.string()]).optional().describe("Read up to this point: seconds or 'm:ss'"),
+      max_tokens: z.number().int().min(200).max(100_000).optional().describe("Token budget for the text part"),
     },
     {
-      title: "Search and read results",
+      title: "Read a video",
       readOnlyHint: true,
       destructiveHint: false,
       openWorldHint: true,
     },
-    async (args) =>
-      // Every fetched page used to travel twice: once in sources[n].content and
-      // again, verbatim, inside `context` under its [n] marker — double the
-      // tokens for the same text. `context` is the part meant for the model, so
-      // sources keep the citation fields and drop the copy (and the raw JSON-LD).
-      toContent(
-        mapPayload(await callApi("/ai/search", args), (p) => {
-          if (typeof p.context !== "string" || !p.context || !Array.isArray(p.sources)) return p;
-          return {
-            ...p,
-            sources: p.sources.map((s: any) => {
-              if (!s || typeof s !== "object") return s;
-              const { content: _content, ...rest } = s;
-              if (rest.metadata && typeof rest.metadata === "object") {
-                const { jsonLd: _jsonLd, ...meta } = rest.metadata;
-                rest.metadata = meta;
-              }
-              return rest;
-            }),
-            note: "Each source's page text is in `context`, under the same [n] number as its `position`.",
-          };
-        })
-      )
+    async (args) => {
+      const result = await callApi("/ai/video", args);
+      if (!result.ok) return toContent(result);
+      const p = result.data?.payload ?? result.data ?? {};
+      const frames = new Map<number, any>();
+      for (const f of Array.isArray(p.frames) ? p.frames : []) if (f?.data) frames.set(Number(f.n), f);
+      // The timeline carries a `[frame N · m:ss · why]` line where each frame
+      // belongs: the picture goes right there, so the model reads the words
+      // spoken over it next to it.
+      const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
+      let buf: string[] = [];
+      const flush = () => {
+        if (buf.length) content.push({ type: "text", text: buf.join("\n") });
+        buf = [];
+      };
+      for (const line of String(p.content ?? "").split("\n")) {
+        buf.push(line);
+        const m = /^\[frame (\d+) · /.exec(line);
+        const f = m ? frames.get(Number(m[1])) : undefined;
+        if (f) {
+          flush();
+          content.push({ type: "image", data: String(f.data), mimeType: String(f.mime || "image/jpeg") });
+        }
+      }
+      const notes = Array.isArray(p.notes) && p.notes.length ? `\n\nNotes:\n- ${p.notes.join("\n- ")}` : "";
+      if (notes) buf.push(notes);
+      flush();
+      return {
+        content,
+        structuredContent: { text: content.filter((block) => block.type === "text").map((block) => block.text).join("\n") },
+      };
+    }
   );
 
   // ── map (URL discovery) ─────────────────────────────────────────────────────
@@ -1488,7 +1780,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
   // ── search_bulk (paginate one query across many pages, async) ────────────────
   server.tool(
     "search_bulk",
-    "Paginate ONE search query asynchronously and merge deduplicated organic results. Page-one AI Overview/PAA/Knowledge Graph/answer enrichments are retained; set render:true to request those Google JS blocks. Billed per page actually fetched, with unavailable pages refunded.",
+    "Paginate ONE search query asynchronously and merge deduplicated organic results. Page-one AI Overview/PAA/Knowledge Graph/answer enrichments are retained; set render:true to request those Google JS blocks. Every page of the query from one device, queries rotate (mobile: iPhone or Android); search_bulk_status leads with search_parameters and search_metadata (served_*). Set `location` to compare SERPs. Billed per page actually fetched, with unavailable pages refunded.",
     {
       query: z.string().min(1).describe("The search query to paginate"),
       engine: z.enum(["google", "bing", "duckduckgo"]).optional().describe("Search engine (default google)"),
@@ -1506,13 +1798,19 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
       country: z.string().length(2).optional().describe("ISO country code, e.g. 'us'"),
       lang: z.string().max(10).optional().describe("UI language, e.g. 'en'"),
       render: z.boolean().optional().describe("Force rendering to capture page-one Google JS enrichments"),
-      device: z.enum(["desktop", "mobile"]).optional().describe("SERP device shape"),
-      location: z.string().max(256).optional().describe("Search location, e.g. 'Milan, Italy'"),
+      device: z
+        .enum(["desktop", "mobile", "ios", "android"])
+        .optional()
+        .describe("desktop (default) | mobile = iPhone Safari or Android Chrome, one per query: every page from it, the next query may get the other | ios = iPhone Safari | android = Android Chrome"),
+      location: z.string().max(256).optional().describe("Search from this place, e.g. 'Milan, Italy'. Set it when comparing SERPs: Google ranks by city."),
       uule: z.string().max(512).optional().describe("Encoded geo token or raw coordinates"),
       safe: z.enum(["active", "off"]).optional().describe("Google SafeSearch setting"),
       nfpr: z.boolean().optional().describe("Disable Google spelling correction"),
       wait_for: z.string().max(512).optional().describe("Rendered path CSS selector for late panels"),
-      browser: z.enum(["chrome", "firefox", "safari"]).optional().describe("Fetch-path browser identity"),
+      browser: z
+        .enum(["chrome", "firefox", "safari"])
+        .optional()
+        .describe("chrome (Windows/macOS, Android) | safari (macOS, iPhone) | firefox (desktop only). Omit to rotate. A device without that browser (e.g. android with safari) is refused."),
       google_params: z
         .record(z.union([z.string(), z.number()]))
         .optional()
@@ -1525,7 +1823,11 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
       destructiveHint: true,
       openWorldHint: true,
     },
-    async (args) => toContent(jobStarted(await callApi("/scraper/serp/bulk", args), "search_bulk_status"))
+    async (args) => {
+      const pair = serpPairError(args.device, args.browser);
+      if (pair) return refusal(pair);
+      return toContent(jobStarted(await callApi("/scraper/serp/bulk", pinBulkPhone(args)), "search_bulk_status"));
+    }
   );
 
   server.tool(
@@ -1798,15 +2100,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
         return toContent(await callApi(path, null, "GET"));
       }
       if ((lvl === "states" || lvl === "cities") && !country) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Error: level '${lvl}' needs \`country\` (a code from level 'countries', e.g. 'us').`,
-            },
-          ],
-          isError: true,
-        };
+        return refusal(`level '${lvl}' needs \`country\` (a code from level 'countries', e.g. 'us').`);
       }
       const query = new URLSearchParams({ planType });
       if (country) query.set("country", country);
@@ -1842,10 +2136,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
         return toContent(await callApi(`/public/proxies/whitelist-ip?orderId=${encodeURIComponent(orderId)}`, null, "GET"));
       }
       if (!ip) {
-        return {
-          content: [{ type: "text" as const, text: "Error: `ip` is required for add/remove" }],
-          isError: true,
-        };
+        return refusal("`ip` is required for add/remove");
       }
       if (action === "remove") {
         return toContent(await callApi("/public/proxies/whitelist-ip", { orderId, ip }, "DELETE"));
@@ -1884,10 +2175,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
       if (slug) {
         const one = all.find((c) => c?.slug === slug);
         if (!one) {
-          return {
-            content: [{ type: "text" as const, text: `No collector with slug '${slug}'. Call list_collectors without slug for the catalog.` }],
-            isError: true,
-          };
+          return textResult(`No collector with slug '${slug}'. Call list_collectors without slug for the catalog.`, true);
         }
         return answer({ collector: one, billing: payload?.billing });
       }
@@ -1936,10 +2224,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
     },
     async ({ slug, input, async: asyncRun }) => {
       if (CHATGPT && CHATGPT_HIDDEN_COLLECTORS.has(slug)) {
-        return {
-          content: [{ type: "text" as const, text: `The collector '${slug}' is not available in this app. Call list_collectors for the ones that are.` }],
-          isError: true,
-        };
+        return textResult(`The collector '${slug}' is not available in this app. Call list_collectors for the ones that are.`, true);
       }
       return toContent(
         withErrorHint(
@@ -2036,19 +2321,18 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
       });
       if (!result.ok) {
         const msg = result.data?.message || result.data?.error || `Request failed (HTTP ${result.status})`;
-        return { content: [{ type: "text", text: `The report could not be sent: ${msg}` }], isError: true };
+        return textResult(`The report could not be sent: ${msg}`, true);
       }
       const id = result.data?.payload?.id;
       const text =
         (result.data?.message || "Thanks — your report reached the team.") +
         (id ? `\nReference: ${id}` : "") +
         (contact ? "" : "\nNo contact was included, so the team cannot reply to this report.");
-      return { content: [{ type: "text", text }] };
+      return textResult(text);
     }
   );
 
   // Tool subset (QUANTICDATA_TOOLS=web, or ?tools=web on the hosted URL).
-  const wanted = parseToolList(opts.tools ?? process.env.QUANTICDATA_TOOLS);
   const registry = (server as any)._registeredTools as Record<string, { remove(): void }> | undefined;
   if (wanted && registry && Object.keys(registry).some((name) => wanted.has(name))) {
     for (const [name, tool] of Object.entries(registry)) if (!wanted.has(name)) tool.remove();

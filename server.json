@@ -1,19 +1,27 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.quantumproxies/quanticdata-mcp",
-  "description": "Live web access for agents: scrape, SERP search, crawl/map, 100+ collectors, datasets, proxies.",
-  "version": "0.11.5",
+  "title": "QuanticData",
+  "description": "Web data and proxies for agents: scrape to Markdown, SERP, crawl/map, unlocker, collectors, proxies.",
+  "version": "0.11.13",
   "websiteUrl": "https://quanticdata.io/mcp-server/",
   "repository": {
     "url": "https://github.com/quantumproxies/quanticdata-mcp-server",
     "source": "github"
   },
+  "icons": [
+    {
+      "src": "https://quanticdata.io/quanticdata-favicon-512.png",
+      "mimeType": "image/png",
+      "sizes": ["512x512"]
+    }
+  ],
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "quanticdata-mcp",
-      "version": "0.11.4",
+      "version": "0.11.13",
       "transport": {
         "type": "stdio"
       },
